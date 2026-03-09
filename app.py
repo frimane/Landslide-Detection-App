@@ -1,4 +1,10 @@
+"""
+app.py
+------
+Landslide Detection System - Satellite imagery analysis with map overlay.
 
+Usage: streamlit run app.py
+"""
 
 import os
 import tempfile
@@ -17,6 +23,7 @@ from streamlit_folium import st_folium
 import base64
 from scipy import ndimage
 
+# ─── Page Configuration ──────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="Landslide Detection",
@@ -42,6 +49,9 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+
+# ─── Model ───────────────────────────────────────────────────────────────────
 
 
 class UNet(nn.Module):
@@ -94,6 +104,10 @@ class PatchNormalizer:
         s = self.stds[:, None, None]
         return np.clip((features - m) / s, -10.0, 10.0).astype(np.float32)
 
+
+# ─── Model Loading ───────────────────────────────────────────────────────────
+
+
 @st.cache_resource
 def load_model(checkpoint_path):
     if not os.path.exists(checkpoint_path):
@@ -105,6 +119,10 @@ def load_model(checkpoint_path):
     model.eval()
     norm = PatchNormalizer(ckpt["normalizer_means"], ckpt["normalizer_stds"])
     return model, norm, ckpt.get("val_metrics", {})
+
+
+# ─── Inference ───────────────────────────────────────────────────────────────
+
 
 def predict_image(model, normalizer, image_data, patch_size=128, progress_cb=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -137,6 +155,10 @@ def predict_image(model, normalizer, image_data, patch_size=128, progress_cb=Non
     if progress_cb:
         progress_cb(1.0)
     return prob / np.maximum(cnt, 1)
+
+
+# ─── Visualization Helpers ───────────────────────────────────────────────────
+
 
 def _to_b64_png(arr):
     mode = "RGBA" if arr.shape[2] == 4 else "RGB"
@@ -202,6 +224,10 @@ def make_rgb_visualization(prob_map, threshold):
     rgb[idx[0][high], idx[1][high]] = [255, 0, 0]
     return rgb
 
+
+# ─── Cluster Detection ───────────────────────────────────────────────────────
+
+
 def find_landslide_clusters(prob_map, bounds_wgs84, threshold, min_cluster_pixels=50):
     """
     Find connected landslide clusters and return a list of dicts with:
@@ -257,6 +283,10 @@ def find_landslide_clusters(prob_map, bounds_wgs84, threshold, min_cluster_pixel
     clusters.sort(key=lambda c: c["max_prob"], reverse=True)
 
     return clusters
+
+
+# ─── Map Builder ─────────────────────────────────────────────────────────────
+
 
 RISK_COLORS = {
     "Critical": "#ff0000",
@@ -336,6 +366,7 @@ def build_map(bounds_wgs84, seg_rgba, clusters):
         opacity=1.0,
         name="Heatmap Overlay",
         show=True,
+        interactive=False,  # clicks pass through to markers below
     ).add_to(m)
 
     # --- White glow border around detected zones ---
@@ -351,6 +382,7 @@ def build_map(bounds_wgs84, seg_rgba, clusters):
         opacity=1.0,
         name="Zone Outlines",
         show=True,
+        interactive=False,  # clicks pass through to markers below
     ).add_to(m)
 
     # --- Pin markers at each landslide cluster ---
@@ -427,21 +459,27 @@ def build_map(bounds_wgs84, seg_rgba, clusters):
     folium.LatLngPopup().add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
 
+    # Raise markers to top of DOM so overlays never block clicks
+    m.get_root().html.add_child(folium.Element(
+        "<script>document.addEventListener('DOMContentLoaded',function(){"
+        "document.querySelectorAll('.leaflet-marker-pane,.leaflet-popup-pane')"
+        ".forEach(function(el){el.style.zIndex=1000;});});</script>"
+    ))
+
     return m
+
+
+# ─── Sidebar ─────────────────────────────────────────────────────────────────
+
 
 def render_sidebar():
     with st.sidebar:
         st.header("Configuration")
 
-        st.info(
-            "**Tips for best results:**\n"
-            "- Upload GeoTIFFs under 200 MB\n"
-            "- Use 1/4 or 1/8 resolution for large files\n"
-            "- File must have exactly 19 bands\n"
-            "- Results are not stored between sessions"
+        checkpoint_path = st.text_input(
+            "Model checkpoint path",
+            value="checkpoints/best_model_smart.pth",
         )
-
-        checkpoint_path = "checkpoints/best_model_smart.pth"
 
         st.divider()
         st.subheader("Detection")
@@ -449,9 +487,9 @@ def render_sidebar():
         threshold = st.slider("Threshold", 0.0, 1.0, 0.5, 0.05,
                               help="Probability cutoff for detection.")
 
-        downsample = st.selectbox("Resolution", [1, 2, 4, 8], index=2,
+        downsample = st.selectbox("Resolution", [1, 2, 4, 8], index=1,
                                   format_func=lambda x: "Full" if x == 1 else f"1/{x}",
-                                  help="Higher = faster, lower detail. Default 1/4 recommended for cloud.")
+                                  help="Higher = faster, lower detail.")
 
         overlay_alpha = st.slider("Overlay transparency", 0, 255, 140, 5,
                                   help="0 = invisible, 255 = fully opaque.")
@@ -467,6 +505,10 @@ def render_sidebar():
         "min_cluster": min_cluster,
     }
 
+
+# ─── Main ────────────────────────────────────────────────────────────────────
+
+
 def main():
     st.title("Landslide Detection System")
     st.caption("Upload satellite GeoTIFF. Detection runs automatically. "
@@ -477,11 +519,8 @@ def main():
     model, normalizer, metrics = load_model(cfg["checkpoint_path"])
 
     if model is None:
-        st.error(
-            f"Model checkpoint not found at `{cfg['checkpoint_path']}`. "
-            "Make sure `checkpoints/best_model_smart.pth` is committed to your repository."
-        )
-        st.info("Repo structure expected: `checkpoints/best_model_smart.pth`")
+        st.error(f"Model not found: {cfg['checkpoint_path']}")
+        st.info("Train a model first and set the correct path.")
         return
 
     if metrics:
@@ -495,43 +534,22 @@ def main():
             c2.metric("Recall", f"{metrics.get('recall', 0):.4f}")
 
     uploaded = st.file_uploader("Upload GeoTIFF", type=["tif", "tiff"],
-                                help="Multi-band GeoTIFF with georeferencing. Max 200 MB.")
+                                help="Multi-band GeoTIFF with georeferencing.")
 
     if uploaded is None:
         st.info("Upload a GeoTIFF file to start.")
         return
 
-    # File size guard – reject files over 200 MB before loading into memory
-    MAX_BYTES = 200 * 1024 * 1024
-    if uploaded.size > MAX_BYTES:
-        st.error(
-            f"File too large ({uploaded.size / 1024 / 1024:.0f} MB). "
-            "Please upload a file smaller than 200 MB, or increase the "
-            "downsampling factor before uploading."
-        )
-        return
-
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tif")
-    tmp_path = tmp.name
-    otmp_path = None
     try:
         tmp.write(uploaded.read())
         tmp.close()
+        temp_path = tmp.name
 
-        with rasterio.open(tmp_path) as src:
+        with rasterio.open(temp_path) as src:
             bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
             ow, oh, nb = src.width, src.height, src.count
             ds = cfg["downsample"]
-
-            # Guard: model expects 19 channels
-            EXPECTED_CHANNELS = 19
-            if nb != EXPECTED_CHANNELS:
-                st.error(
-                    f"This model expects {EXPECTED_CHANNELS} bands but the uploaded "
-                    f"file has {nb}. Please upload the correct multi-band composite."
-                )
-                return
-
             if ds > 1:
                 nw, nh = ow // ds, oh // ds
                 data = src.read(out_shape=(nb, nh, nw),
@@ -634,16 +652,16 @@ def main():
                                png_buf.getvalue(), "landslide_probability.png",
                                "image/png", use_container_width=True)
 
-        with rasterio.open(tmp_path) as src:
+        with rasterio.open(temp_path) as src:
             meta = src.meta.copy()
             meta.update(count=1, dtype="float32")
             otmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tif")
-            otmp_path = otmp.name
             otmp.close()
-            with rasterio.open(otmp_path, "w", **meta) as dst:
+            with rasterio.open(otmp.name, "w", **meta) as dst:
                 dst.write(prob_map, 1)
-            with open(otmp_path, "rb") as f:
+            with open(otmp.name, "rb") as f:
                 geo_bytes = f.read()
+            os.remove(otmp.name)
 
         with d2:
             st.download_button("Download detection GeoTIFF",
@@ -652,20 +670,14 @@ def main():
 
     except rasterio.errors.RasterioIOError as e:
         st.error(f"Invalid GeoTIFF: {e}")
-    except MemoryError:
-        st.error(
-            "Out of memory processing this file. "
-            "Try a higher downsampling factor (e.g. 1/4 or 1/8) and re-upload."
-        )
     except Exception as e:
         st.error(f"Error: {e}")
     finally:
-        for path in [tmp_path, otmp_path]:
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+        if os.path.exists(tmp.name):
+            try:
+                os.remove(tmp.name)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
